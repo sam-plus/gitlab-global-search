@@ -1,5 +1,7 @@
 {
+  "name": "gitlab-global-search",
   "private": true,
+  "description": "gitlab全局搜索，使用gitlab api实现多项目搜索",
   "scripts": {
     "start": "umi dev",
     "build": "umi build",

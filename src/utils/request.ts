@@ -1,7 +1,7 @@
 import { extend } from 'umi-request';
 
 const request = extend({
-  credentials: 'include'
+  credentials: 'include',
 });
 
 export default request;
