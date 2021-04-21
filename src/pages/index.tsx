@@ -1,13 +1,13 @@
 /*
  * @Author: Sam Plus
  * @Date: 2021-02-19 18:38:12
- * @LastEditTime: 2021-03-02 21:44:24
+ * @LastEditTime: 2021-04-21 23:04:17
  * @LastEditors: Sam Plus
  * @Description: gitlab全局搜索-多项目搜索, 访问链接可设置keyWord、token以及groups三个参数。例如：
- *   http://127.0.0.1:8000/?keyword=const&token=fqYw--u3AbqFcLV6vQws&groups=tools;test
+ *   http://127.0.0.1:8000/?keyword=xxx&token=xxx&groups=xx;xx
  * @FilePath: \gitlab-global-search\src\pages\index.tsx
  */
-import React, { PureComponent } from 'react';
+import { PureComponent } from 'react';
 import { connect as connectComponent } from 'dva';
 import { History, Dispatch, ConnectProps, IndexModelState, Loading } from 'umi';
 import { Layout, Typography, Card, Pagination, Row, Col, Spin } from 'antd';
@@ -19,7 +19,7 @@ const { Header, Content, Footer } = Layout;
 const { Title, Text } = Typography;
 
 interface GitlabSearchPageProps extends ConnectProps {
-  loading: boolean;
+  loading: { global: boolean };
   history: History;
   dispatch: Dispatch;
   searchGitlab: IndexModelState;
@@ -34,12 +34,13 @@ interface GitlabSearchPageState {
   currentPage: number;
   pageSize: number;
   selectGroups: Array<string>;
+  status: string;
 }
 
 interface searchHandleType {
-  searchKeyWord: string;
+  keyword: string;
   selectGroups: Array<any>;
-  accessToken: string;
+  token: string;
 }
 
 // Typescript 不建议把表达式函数作为装饰符来使用，重写connect
@@ -72,14 +73,13 @@ class GitlabSearchPage extends PureComponent<
       token = '',
     }: any = this.props.history.location.query;
 
-    const selectGroups = groups?.split(';') || [];
-
     this.state = {
       keyword,
       token,
       currentPage: 1,
       pageSize: 10,
-      selectGroups,
+      selectGroups: groups?.split(';') || [],
+      status: '',
     };
   }
 
@@ -89,8 +89,8 @@ class GitlabSearchPage extends PureComponent<
     await this.getAllProjects();
 
     const { keyword, selectGroups } = this.state;
-
     let projects = [];
+
     if (selectGroups.length) {
       projects = await this.getProjectsOfGroups(selectGroups);
     } else {
@@ -107,6 +107,7 @@ class GitlabSearchPage extends PureComponent<
     const { allGroups } = this.props;
 
     if (!allGroups.length) {
+      // 从网页存储中获取组列表
       const gitlabGroups = JSON.parse(
         localStorage.getItem('gitlabGroups') || '[]',
       );
@@ -123,6 +124,13 @@ class GitlabSearchPage extends PureComponent<
             token: this.state.token,
           },
         });
+
+        await this.props.dispatch({
+          type: 'searchGitlab/save',
+          result: { allGroups: res },
+        });
+
+        // 把请求到的组列表保存到网页存储中
         localStorage.setItem('gitlabGroups', JSON.stringify(res));
       }
     }
@@ -134,6 +142,7 @@ class GitlabSearchPage extends PureComponent<
 
     if (allProjects.length) return;
 
+    // 从网页存储中获取项目列表
     const gitlabProjects =
       JSON.parse(localStorage.getItem('gitlabProjects') || '[]') || [];
 
@@ -148,6 +157,7 @@ class GitlabSearchPage extends PureComponent<
       if (allGroups.length) {
         let promiseArr: Array<Promise<object>> = [];
 
+        // 遍历项目组，获取每个组包含的项目
         allGroups.forEach(async (group) => {
           const everyGetProject: Promise<object> = new Promise(
             async (resolve) => {
@@ -166,12 +176,14 @@ class GitlabSearchPage extends PureComponent<
           promiseArr.push(everyGetProject);
         });
 
+        // 拿到所有组的项目数据后保存数据
         await Promise.all(promiseArr).then(async (values) => {
           await this.props.dispatch({
             type: 'searchGitlab/save',
             result: { allProjects: values.flat(1) },
           });
 
+          // 把请求到的项目列表保存到网页存储中
           localStorage.setItem(
             'gitlabProjects',
             JSON.stringify(values.flat(1)),
@@ -183,15 +195,17 @@ class GitlabSearchPage extends PureComponent<
 
   /**
    * 获取组包含的项目
-   * @param {*} groups
+   * @param {*} selectGroups 选择的组
    */
-  async getProjectsOfGroups(groups: Array<any>) {
+  async getProjectsOfGroups(selectGroups: Array<any>) {
     const { allProjects } = this.props;
 
     let containProjects: Array<any> = [];
 
-    groups.forEach((group) => {
+    selectGroups.forEach((group) => {
       const filterProjects = allProjects.filter((project) => {
+        // url上带groups参数时，selectGroups = ['group-name'];
+        // 从选择框选择groups时，selectGroups = [{id: group-id}]
         return (
           project.namespace.id === group.id ||
           project.namespace.name === group.id ||
@@ -206,17 +220,29 @@ class GitlabSearchPage extends PureComponent<
   }
 
   /**
-   * 根据关键字搜索项目代码
+   * 根据关键字逐个搜索项目代码，控制请求并发数为50
    * @param {string} keyword 搜索关键词
    * @param {Array<any>} projects 需要搜索的项目
    */
   async getCodeByKeyWord(keyword: string, projects: Array<any>) {
     if (keyword === '' && !projects.length) return;
 
-    let codeResult: Array<any> = [];
+    this.showSearchStatus('ing');
 
-    // 根据关键字逐个项目搜索
-    projects.forEach(async (project) => {
+    let codeResult: Array<any> = []; // 保存请求结果
+    const all: number = projects.length; // 请求总个数
+    let countExcuted: number = 0; // 已发起的请求个数
+
+    const next = async () => {
+      let current = countExcuted++;
+      const project = projects[current];
+
+      if (current >= all) {
+        // 请求全部完成
+        this.showSearchStatus('end');
+        return;
+      }
+
       const codeRecode: Array<any> = await this.props.dispatch({
         type: 'searchGitlab/getGitlabCodeResult',
         params: {
@@ -226,27 +252,84 @@ class GitlabSearchPage extends PureComponent<
         },
       });
 
-      if (codeRecode.length) {
-        let handledCodeRecode = codeRecode.map((code) => {
-          const codeLines = code.data.split(/\n/g).length - 1;
+      codeResult.push(this.handleSearchResult(project, codeRecode));
 
-          return {
-            ...code,
-            codeLines,
-            file_path: `${project.path_with_namespace}/blob/${code.ref}/${code.path}`,
-          };
-        });
-
-        codeResult.push(handledCodeRecode);
-      }
-
+      // 保存搜索结果
       await this.props.dispatch({
         type: 'searchGitlab/save',
         result: { codeResult: codeResult.flat(1) },
       });
+
+      // 还有项目没搜索完就继续
+      if (current < all) {
+        next();
+      }
+    };
+
+    while (countExcuted < 50) {
+      next();
+    }
+
+    // projects.forEach(async (project, index) => {
+    //   const codeRecode: Array<any> = await this.props.dispatch({
+    //     type: 'searchGitlab/getGitlabCodeResult',
+    //     params: {
+    //       keyword,
+    //       projectId: project?.id || '',
+    //       token: this.state.token,
+    //     },
+    //   });
+
+    //   codeResult.push(this.handleSearchResult(project, codeRecode));
+
+    //   // 保存搜索结果
+    //   await this.props.dispatch({
+    //     type: 'searchGitlab/save',
+    //     result: { codeResult: codeResult.flat(1) },
+    //   });
+
+    //   (index === projects.length - 1) && this.showSearchStatus('end');
+    // });
+    // }
+  }
+
+  /**
+   * 对搜索结果进行处理
+   * @param project
+   * @param codeRecode
+   * @returns
+   */
+  handleSearchResult(project: any, codeRecode: Array<any>) {
+    if (codeRecode.length) {
+      let handledCodeRecode = codeRecode.map((code) => {
+        // 返回的搜索结果是代码格式，需要根据其换行符判断代码有多少行
+        const codeLines = code.data.split(/\n/g).length - 1;
+
+        return {
+          ...code,
+          codeLines,
+          file_path: `${project.path_with_namespace}/blob/${code.ref}/${code.path}`,
+        };
+      });
+      return handledCodeRecode;
+    }
+    return [];
+  }
+
+  /**
+   * 页面展示搜索过程
+   * @param status
+   */
+  showSearchStatus(status: 'ing' | 'end') {
+    this.setState({
+      status: status === 'ing' ? 'Searching...' : 'Search end...',
     });
   }
 
+  /**
+   * 点击搜索处理逻辑
+   * @param param0
+   */
   async searchHandle({ keyword, selectGroups, token }: searchHandleType) {
     let { allProjects: projects } = this.props;
 
@@ -257,6 +340,7 @@ class GitlabSearchPage extends PureComponent<
         currentPage: 1,
       },
       async () => {
+        // 如果当前页面项目列表为空，需要重新获取组和项目信息
         if (!projects.length) {
           await this.getAllGroups();
           await this.getAllProjects();
@@ -286,7 +370,15 @@ class GitlabSearchPage extends PureComponent<
   }
 
   render() {
-    const { keyword, selectGroups, token, currentPage, pageSize } = this.state;
+    const {
+      keyword,
+      selectGroups,
+      token,
+      currentPage,
+      pageSize,
+      status,
+    } = this.state;
+
     const {
       allGroups,
       codeResult,
@@ -314,8 +406,9 @@ class GitlabSearchPage extends PureComponent<
 
         <Content className="layout-content">
           <Title level={4}>
-            Showing <Text type="danger">{!global ? codeResult.length : 0}</Text>{' '}
-            code results for <Text type="danger">{keyword}</Text>
+            <Text type="danger">{status}</Text>Showing{' '}
+            <Text type="danger">{!global ? codeResult.length : 0}</Text> code
+            results for <Text type="danger">{keyword}</Text>
           </Title>
 
           <Spin spinning={global} />
@@ -352,11 +445,12 @@ class GitlabSearchPage extends PureComponent<
           {codeResult.length > 10 && (
             <Pagination
               showQuickJumper
+              showSizeChanger
               defaultCurrent={1}
               current={currentPage}
               total={codeResult.length}
               onChange={(page, pageSize) =>
-                this.changePagination(page, pageSize)
+                this.changePagination(page, pageSize || 10)
               }
             />
           )}
